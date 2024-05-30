@@ -24,6 +24,8 @@ autoload -U colors && colors
 # Settings
 : "${ZSH_GIT_PROMPT_SHOW_UPSTREAM=""}"
 : "${ZSH_GIT_PROMPT_SHOW_STASH=""}"
+: "${ZSH_GIT_PROMPT_SHOW_TRACKING_COUNTS="1"}"
+: "${ZSH_GIT_PROMPT_SHOW_LOCAL_COUNTS="1"}"
 : "${ZSH_GIT_PROMPT_ENABLE_SECONDARY=""}"
 : "${ZSH_GIT_PROMPT_NO_ASYNC=""}"
 : "${ZSH_GIT_PROMPT_FORCE_BLANK=""}"
@@ -66,23 +68,37 @@ setopt PROMPT_SUBST
 (( $+commands[mawk] ))  &&  : "${ZSH_GIT_PROMPT_AWK_CMD:=mawk}"
 (( $+commands[nawk] ))  &&  : "${ZSH_GIT_PROMPT_AWK_CMD:=nawk}"
                             : "${ZSH_GIT_PROMPT_AWK_CMD:=awk}"
-
-function _zsh_git_prompt_git_status() {
-    emulate -L zsh
-    {
+# Use --show-stash for git versions newer than 2.35.0
+_zsh_git_prompt_git_version=$(command git version)
+if [[ "${_zsh_git_prompt_git_version:12}" == 2.<35->.<-> ]]; then
+    _zsh_git_prompt_git_cmd() {
+        GIT_OPTIONAL_LOCKS=0 command git status --show-stash --branch --porcelain=v2 2>&1 \
+            || echo "fatal: git command failed"
+    }
+else
+    _zsh_git_prompt_git_cmd() {
         [[ -n "$ZSH_GIT_PROMPT_SHOW_STASH" ]] && (
             c=$(command git rev-list --walk-reflogs --count refs/stash 2> /dev/null)
-            [[ -n "$c" ]] && echo "# stash.count $c"
+            [[ -n "$c" ]] && echo "# stash $c"
         )
         GIT_OPTIONAL_LOCKS=0 command git status --branch --porcelain=v2 2>&1 \
             || echo "fatal: git command failed"
-    } | $ZSH_GIT_PROMPT_AWK_CMD \
+            }
+fi
+unset _zsh_git_prompt_git_version
+
+
+function _zsh_git_prompt_git_status() {
+    emulate -L zsh
+    _zsh_git_prompt_git_cmd | $ZSH_GIT_PROMPT_AWK_CMD \
         -v PREFIX="$ZSH_THEME_GIT_PROMPT_PREFIX" \
         -v SUFFIX="$ZSH_THEME_GIT_PROMPT_SUFFIX" \
         -v SEPARATOR="$ZSH_THEME_GIT_PROMPT_SEPARATOR" \
         -v DETACHED="$ZSH_THEME_GIT_PROMPT_DETACHED" \
         -v BRANCH="$ZSH_THEME_GIT_PROMPT_BRANCH" \
         -v UPSTREAM_TYPE="$ZSH_GIT_PROMPT_SHOW_UPSTREAM" \
+        -v SHOW_TRACKING_COUNTS="$ZSH_GIT_PROMPT_SHOW_TRACKING_COUNTS" \
+        -v SHOW_LOCAL_COUNTS="$ZSH_GIT_PROMPT_SHOW_LOCAL_COUNTS" \
         -v UPSTREAM_SYMBOL="$ZSH_THEME_GIT_PROMPT_UPSTREAM_SYMBOL" \
         -v UPSTREAM_NO_TRACKING="$ZSH_THEME_GIT_PROMPT_UPSTREAM_NO_TRACKING" \
         -v UPSTREAM_PREFIX="$ZSH_THEME_GIT_PROMPT_UPSTREAM_PREFIX" \
@@ -94,6 +110,7 @@ function _zsh_git_prompt_git_status() {
         -v UNSTAGED="$ZSH_THEME_GIT_PROMPT_UNSTAGED" \
         -v UNTRACKED="$ZSH_THEME_GIT_PROMPT_UNTRACKED" \
         -v STASHED="$ZSH_THEME_GIT_PROMPT_STASHED" \
+        -v SHOW_STASH="$ZSH_GIT_PROMPT_SHOW_STASH" \
         -v CLEAN="$ZSH_THEME_GIT_PROMPT_CLEAN" \
         -v RC="%{$reset_color%}" \
         '
@@ -111,6 +128,28 @@ function _zsh_git_prompt_git_status() {
                 staged = 0;
                 unstaged = 0;
                 stashed = 0;
+            }
+                        function prompt_element(prefix, content, suffix) {
+                print(prefix);
+                gsub("%", "%%", content);
+                print(content);
+                print(suffix);
+                print(RC);
+            }
+            function count_element(prefix, count, show_count) {
+                content = "";
+                if (show_count) {
+                    content = count;
+                }
+                if (count > 0) {
+                    prompt_element(prefix, content);
+                }
+            }
+            function local_element(prefix, count) {
+                count_element(prefix, count, SHOW_LOCAL_COUNTS)
+            }
+            function tracking_element(prefix, count) {
+                count_element(prefix, count, SHOW_TRACKING_COUNTS)
             }
 
             $1 == "fatal:" {
@@ -152,7 +191,7 @@ function _zsh_git_prompt_git_status() {
                 }
             }
 
-            $2 == "stash.count" {
+            $2 == "stash" {
                 stashed = $3;
             }
 
@@ -161,83 +200,44 @@ function _zsh_git_prompt_git_status() {
                     exit(1);
                 }
 
-                print PREFIX;
-                print RC;
-
+                prompt_element(PREFIX);
                 if (head == "(detached)") {
-                    print DETACHED;
-                    print substr(oid, 0, 7);
+                     prompt_element(DETACHED, substr(oid, 0, 7));
                 } else {
-                    print BRANCH;
-                    gsub("%", "%%", head);
-                    print head;
+                    prompt_element(BRANCH, head);
                 }
-                print RC;
 
                 if (upstream == "") {
-                    print UPSTREAM_NO_TRACKING;
+                    prompt_element(UPSTREAM_NO_TRACKING);
                 } else if (UPSTREAM_TYPE == "symbol") {
-                    print UPSTREAM_SYMBOL;
+                    prompt_element(UPSTREAM_SYMBOL);
                 } else if (UPSTREAM_TYPE == "full") {
-                    print UPSTREAM_PREFIX;
-                    gsub("%", "%%", upstream);
-                    print upstream;
-                    print UPSTREAM_SUFFIX;
-                }
+                prompt_element(UPSTREAM_PREFIX, upstream, UPSTREAM_SUFFIX);
+            }
 
-                print RC;
+           tracking_element(BEHIND, behind * -1);
 
-                if (behind < 0) {
-                    print BEHIND;
-                    printf "%d", behind * -1;
-                    print RC;
-                }
+                tracking_element(AHEAD, ahead * 1);
 
-                if (ahead > 0) {
-                    print AHEAD;
-                    printf "%d", ahead;
-                    print RC;
-                }
+                prompt_element(SEPARATOR);
 
-                print SEPARATOR;
+                local_element(UNMERGED, unmerged);
 
-                if (unmerged > 0) {
-                    print UNMERGED;
-                    print unmerged;
-                    print RC;
-                }
+                local_element(STAGED, staged);
 
-                if (staged > 0) {
-                    print STAGED;
-                    print staged;
-                    print RC;
-                }
+                local_element(UNSTAGED, unstaged);
 
-                if (unstaged > 0) {
-                    print UNSTAGED;
-                    print unstaged;
-                    print RC;
-                }
+                local_element(UNTRACKED, untracked);
 
-                if (untracked > 0) {
-                    print UNTRACKED;
-                    print untracked;
-                    print RC;
-                }
-
-                if (stashed > 0) {
-                    print STASHED;
-                    print stashed;
-                    print RC;
+                if (SHOW_STASH) {
+                    local_element(STASHED, stashed);
                 }
 
                 if (unmerged == 0 && staged == 0 && unstaged == 0 && untracked == 0) {
-                    print CLEAN;
-                    print RC;
+                    prompt_element(CLEAN);
                 }
 
-                print SUFFIX;
-                print RC;
+                prompt_element(SUFFIX);
             }
         '
 }
